@@ -81,7 +81,7 @@ Cherry-pick only the checks that make sense for your project.
 | Check | What it catches |
 |-------|-----------------|
 | `NarratorDoc` | `@moduledoc "This module provides functionality for..."` |
-| `DocFalseOnPublicFunction` | `@doc false` on `def` — document it or make it `defp` |
+| `DocFalseOnPublicFunction` | Multiple `@doc false` on `def` in one module — cargo-culted |
 | `BoilerplateDocParams` | `## Parameters\n- conn: The connection struct` |
 | `ObviousComment` | `# Fetch the user` above `Repo.get(User, id)` |
 | `StepComment` | `# Step 1: Validate input` |

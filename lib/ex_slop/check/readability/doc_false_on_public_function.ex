@@ -4,28 +4,36 @@ defmodule ExSlop.Check.Readability.DocFalseOnPublicFunction do
     base_priority: :low,
     category: :readability,
     tags: [:ex_slop],
+    param_defaults: [min_count: 2],
     explanations: [
       check: """
-      `@doc false` on a public function (`def`, not `defp`) is a code smell.
-      If the function is truly internal, make it `defp`. If it's public API,
-      document it.
+      Multiple `@doc false` on public functions in the same module is a
+      code smell — typically cargo-culted from Phoenix generators.
 
-      This check skips known legitimate uses:
-      - Functions annotated with `@impl true` (behaviour callbacks)
-      - OTP callbacks: `child_spec`, `start_link`, `init`
-      - Protocol/macro internals: `__using__`, `__changeset__`, etc.
+      A single `@doc false` is a deliberate choice. But when an LLM
+      sprays it across every function, it's hiding the API surface.
 
-          # bad — cargo-culted from Phoenix generators
-          @doc false
-          def changeset(user, attrs) do
+          # bad — every public function has @doc false
+          defmodule MyAppWeb.UserController do
+            @doc false
+            def index(conn, _params), do: ...
 
-          # good — either document it
-          @doc "Casts and validates registration fields."
-          def changeset(user, attrs) do
+            @doc false
+            def show(conn, %{"id" => id}), do: ...
 
-          # good — or make it private
-          defp changeset(user, attrs) do
-      """
+            @doc false
+            def create(conn, %{"user" => params}), do: ...
+          end
+
+          # good — either document or make private
+          defmodule MyAppWeb.UserController do
+            def index(conn, _params), do: ...
+            def show(conn, %{"id" => id}), do: ...
+          end
+      """,
+      params: [
+        min_count: "Minimum `@doc false` count per module to trigger (default: 2)."
+      ]
     ]
 
   @otp_callbacks ~w(child_spec start_link init terminate code_change
@@ -37,52 +45,53 @@ defmodule ExSlop.Check.Readability.DocFalseOnPublicFunction do
   @doc false
   @impl true
   def run(%SourceFile{} = source_file, params) do
+    min_count = Params.get(params, :min_count, __MODULE__)
     ctx = Context.build(source_file, params, __MODULE__)
-    result = Credo.Code.prewalk(source_file, &walk/2, ctx)
-    result.issues
-  end
 
-  defp walk({:@, _, [{:doc, _, [false]}]} = ast, ctx) do
-    {ast, Map.put(ctx, :doc_false_line, source_line(ast))}
-  end
+    {hits, _pending} =
+      Credo.Code.prewalk(source_file, &walk/2, {[], false})
 
-  defp walk({:@, _, [{:impl, _, [true]}]} = ast, ctx) do
-    {ast, Map.delete(ctx, :doc_false_line)}
-  end
-
-  defp walk({:@, _, [{:impl, _, [{:__block__, _, [true]}]}]} = ast, ctx) do
-    {ast, Map.delete(ctx, :doc_false_line)}
-  end
-
-  defp walk({:def, meta, [{name, _, _} | _]} = ast, ctx) when is_atom(name) do
-    if Map.has_key?(ctx, :doc_false_line) do
-      ctx = Map.delete(ctx, :doc_false_line)
-
-      if exempt?(name) do
-        {ast, ctx}
-      else
-        {ast, put_issue(ctx, issue_for(ctx, meta, name))}
-      end
+    if length(hits) >= min_count do
+      Enum.reduce(hits, ctx, fn {meta, name}, ctx ->
+        put_issue(ctx, issue_for(ctx, meta, name))
+      end)
+      |> Map.get(:issues, [])
     else
-      {ast, ctx}
+      []
     end
   end
 
-  defp walk({:defp, _, _} = ast, ctx) do
-    {ast, Map.delete(ctx, :doc_false_line)}
+  defp walk({:@, _, [{:doc, _, [false]}]} = ast, {hits, _}) do
+    {ast, {hits, true}}
   end
 
-  defp walk({:@, _, [{attr, _, _}]} = ast, ctx) when attr in [:doc, :moduledoc] do
-    {ast, Map.delete(ctx, :doc_false_line)}
+  defp walk({:@, _, [{:impl, _, [true]}]} = ast, {hits, _}) do
+    {ast, {hits, false}}
   end
 
-  defp walk(ast, ctx), do: {ast, ctx}
-
-  defp exempt?(name) do
-    name in @otp_callbacks or name in @dunder_functions
+  defp walk({:@, _, [{:impl, _, [{:__block__, _, [true]}]}]} = ast, {hits, _}) do
+    {ast, {hits, false}}
   end
 
-  defp source_line({:@, meta, _}), do: meta[:line]
+  defp walk({:def, meta, [{name, _, _} | _]} = ast, {hits, true}) when is_atom(name) do
+    if exempt?(name) do
+      {ast, {hits, false}}
+    else
+      {ast, {[{meta, name} | hits], false}}
+    end
+  end
+
+  defp walk({:defp, _, _} = ast, {hits, _}) do
+    {ast, {hits, false}}
+  end
+
+  defp walk({:@, _, [{attr, _, _}]} = ast, {hits, _}) when attr in [:doc, :moduledoc] do
+    {ast, {hits, false}}
+  end
+
+  defp walk(ast, acc), do: {ast, acc}
+
+  defp exempt?(name), do: name in @otp_callbacks or name in @dunder_functions
 
   defp issue_for(ctx, meta, name) do
     format_issue(ctx,
